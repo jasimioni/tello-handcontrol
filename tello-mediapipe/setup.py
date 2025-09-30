@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'tello-mediapipe'
+package_name = 'tello_mediapipe'
 
 setup(
     name=package_name,
@@ -20,6 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'gestures = tello_mediapipe.read_gestures:main',
         ],
     },
 )

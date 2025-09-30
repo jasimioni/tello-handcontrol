@@ -16,6 +16,27 @@ CALIBRATION_CONSTANT = 5000
 image_width = 640  # Default width, adjust as needed
 image_height = 480 # Default height, adjust as needed
 
+class PIDController:
+    """A simple PID controller class."""
+    def __init__(self, kp, ki, kd):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.prev_error = 0.0
+        self.integral = 0.0
+
+    def update(self, error, dt):
+        """Calculates the PID output."""
+        self.integral += error * dt
+        derivative = (error - self.prev_error) / dt
+        output = self.kp * error + self.ki * self.integral + self.kd * derivative
+        self.prev_error = error
+        return output
+    
+    def clean(self):
+        self.prev_error = 0.0
+        self.integral = 0.0
+
 def is_hand_open(hand_landmarks):
     """
     Checks if a hand is open by comparing the y-coordinates of the fingertips
@@ -119,6 +140,9 @@ class MediaPipeHandsNode(Node):
     def __init__(self):
         super().__init__('mediapipe_hands_node')
         
+        self.MAX_LINEAR_SPEED = 1.0  # m/s
+        self.MAX_ANGULAR_SPEED = 1.0 # rad/s
+        
         # 3. Initialize MediaPipe Hands
         # It's important to initialize this once to avoid reloading the model
         self.mp_hands = mp.solutions.hands
@@ -138,6 +162,13 @@ class MediaPipeHandsNode(Node):
         self.landing = False
         self.land_check_count = 0
         self.flying_check_count = 0
+        self.last_time = None
+        self.last_expected_distance = None
+
+        self.pid_forward = PIDController(kp=0.4, ki=0.001, kd=0.005)   # Controls linear.x
+        self.pid_vertical = PIDController(kp=1.2, ki=0.2, kd=0.3)      # Controls linear.z
+        self.pid_sideways = PIDController(kp=0.5, ki=0.1, kd=0.1)      # Controls linear.y
+        self.pid_yaw = PIDController(kp=0.8, ki=0.1, kd=0.2)           # Controls angular.z
         
         self.multi_hand_detected_count = 0
         self.no_hands_detected_count = 0
@@ -243,75 +274,75 @@ class MediaPipeHandsNode(Node):
         self.get_logger().info(f'Published Tello action: {action}')
 
     def adjust_flight(self, hand_state, h_status, v_status, normal_vector, distance):
+        if not self.flying:
+            return
+    
         # hand_state = "Open" or "Closed"
         # h_status from 0.0 to 1.0
         # v_status from 0.0 to 1.0
         # normal_vector = [x, y, z] each from -1.0 to 1.0
         # distance = estimated distance in cm
         
-        if not self.flying:
-            return
-        
-        cmd_vel = Twist()
-        
-        self.get_logger().info(f'Hand: {hand_state}, H: {h_status}, V: {v_status}, Normal: {normal_vector}, Dist: {distance:.1f} cm')
-        
-        if hand_state == "Closed":
-            expected_distance = 50.0  # Closer when hand is closed
-        else:
-            expected_distance = 100.0  # Further when hand is open
-            
         distance = float(distance)
         h_status = float(h_status)
         v_status = float(v_status)
-            
+
+        # Calculate time delta (dt) for PID controllers
+        current_time = time.time()
+        if not self.last_time:
+            self.last_time = current_time
+            return
         
-        if abs(distance - expected_distance) > 10:
-            if float(distance) > float(expected_distance):
-                self.get_logger().info('Too far, moving forward')
-                cmd_vel.linear.x = 0.2
-            elif float(distance) < float(expected_distance):
-                self.get_logger().info('Too close, moving backward')
-                cmd_vel.linear.x = -0.2
-        else:
-            self.get_logger().info("At the right spot")
-            cmd_vel.linear.x = 0.0
-            
-        if h_status < 0.4:
-            self.get_logger().info('Hand left, moving left')
-            cmd_vel.linear.y = 0.2
-            cmd_vel.angular.z = 0.2
-        elif float(h_status) > 0.6:
-            self.get_logger().info('Hand right, moving right')
-            cmd_vel.linear.y = -0.2
-            cmd_vel.angular.z = -0.2
-        else:
-            self.get_logger().info('Hand is horizontally ok - holding')
-            cmd_vel.linear.y = 0.0
-            cmd_vel.angular.z = 0.0
-            
-        if float(v_status) < 0.4:
-            self.get_logger().info('Hand up, moving up')
-            cmd_vel.linear.z = 0.2
-        elif float(v_status) > 0.6:
-            self.get_logger().info('Hand down, moving down')
-            cmd_vel.linear.z = -0.2
-        else:
-            self.get_logger().info('Hand height is good')
-            cmd_vel.linear.z = 0.0
-            
-        #if normal_vector is not None:
-        #    if float(normal_vector[0]) > 0.1:
-        #        self.get_logger().info('Palm tilted right, rotating right')
-        #        cmd_vel.angular.z = 0.3
-        #    elif float(normal_vector[0]) < -0.1:
-        #        self.get_logger().info('Palm tilted left, rotating left')
-        #        cmd_vel.angular.z = -0.3
-        #    else:
-        #        self.get_logger().info('Palm is good. Holding.')
-        #        cmd_vel.angular.z = 0.0
-            
-        self.get_logger().info(f"Sending: {cmd_vel}")
+        dt = current_time - self.last_time
+        self.last_time = current_time
+        if dt == 0:
+            return
+
+        # --- 1. Define Setpoints (Target Values) ---
+        # Setpoint for distance
+        expected_distance = 80.0 if hand_state == "Closed" else 130.0
+        
+        # Reset PID integrals if the goal changes to prevent sudden jumps
+        if expected_distance != self.last_expected_distance:
+            self.get_logger().info("Hand state changed, resetting PID controllers.")
+            self.pid_forward.clean()
+            self.last_expected_distance = expected_distance
+
+        # Setpoint for horizontal and vertical position is the center of the screen (0.5)
+        h_setpoint = 0.5
+        v_setpoint = 0.5
+
+        # If hand is to the right (h_status > 0.5), error is negative -> move right (negative y)
+        h_error = h_setpoint - h_status
+        
+        # If hand is down (v_status > 0.5), error is negative -> move down (negative z)
+        v_error = v_setpoint - v_status
+        
+        # Let's redefine the error to be more intuitive
+        # Positive error = move forward. Negative error = move back
+        distance_error = (distance - expected_distance) / 100.0
+
+        forward_speed = self.pid_forward.update(distance_error, dt)
+        vertical_speed = self.pid_vertical.update(v_error, dt)
+        sideways_speed = self.pid_sideways.update(h_error, dt)
+        yaw_speed = self.pid_yaw.update(h_error, dt)
+
+        # --- 4. Clamp Outputs to Safe Maximums ---
+        forward_speed = np.clip(forward_speed, -self.MAX_LINEAR_SPEED, self.MAX_LINEAR_SPEED)
+        vertical_speed = np.clip(vertical_speed, -self.MAX_LINEAR_SPEED, self.MAX_LINEAR_SPEED)
+        sideways_speed = np.clip(sideways_speed, -self.MAX_LINEAR_SPEED, self.MAX_LINEAR_SPEED)
+        yaw_speed = np.clip(yaw_speed, -self.MAX_ANGULAR_SPEED, self.MAX_ANGULAR_SPEED)
+        
+        # --- 5. Publish Command ---
+        cmd_vel = Twist()
+        cmd_vel.linear.x = forward_speed
+        cmd_vel.linear.y = sideways_speed
+        cmd_vel.linear.z = vertical_speed
+        cmd_vel.angular.z = yaw_speed
+        
+        self.get_logger().info(f"Errors(d,h,v):({distance_error:.2f}, {h_error:.2f}, {v_error:.2f}) -> "
+                               f"Cmd(x,y,z,yaw):({forward_speed:.2f}, {sideways_speed:.2f}, {vertical_speed:.2f}, {yaw_speed:.2f})")
+        
         self.cmd_vel_pub.publish(cmd_vel)
         
     def image_callback(self, msg):

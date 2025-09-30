@@ -7,10 +7,17 @@ cd ~/ros2_ws/src
 git clone https://github.com/jasimioni/tello-handcontrol.git
 ```
 
-## Not building yet...
+## Build the package
 
 ```
 cd ~/ros2_ws/
+colcon build --packages-select tello_mediapipe
+```
+
+## Run it
+
+```
+cd ~/ros2_ws
 source install/setup.bash
-python3 tello-handcontrol/tello-mediapipe/tello-mediapipe/read-gestures.py
+ros2 run tello_mediapipe gestures
 ```
