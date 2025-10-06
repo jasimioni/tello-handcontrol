@@ -5,4 +5,4 @@
 - [USB Camera](usbcamera.md)
 - [Mediapipe](mediapipe.md)
 - [Tello](tello.md)
-- [Tello Mediapipe Controller][tello-handcontrol.md]
+- [Tello Mediapipe Controller](tello-handcontrol.md)
