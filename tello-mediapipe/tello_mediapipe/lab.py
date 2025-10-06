@@ -178,20 +178,11 @@ class MediaPipeHandsNode(Node):
         # 2. Create subscriber and publisher
         self.subscription = self.create_subscription(
             Image,
-            '/image_raw',
+            '/camera1/image_raw',
             self.image_callback,
             10)
         self.publisher = self.create_publisher(Image, '/image_processed', 10)
     
-        self.cli = self.create_client(TelloAction, '/tello_action')
-        while not self.cli.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('service not available, waiting again...')
-        self.req = TelloAction.Request()
-        
-        #self.tello_action('takeoff')
-        #time.sleep(10)
-        #self.tello_action('land')
-        
         self.cmd_vel_pub = self.create_publisher(
             Twist, '/cmd_vel', 10)
     
@@ -204,7 +195,6 @@ class MediaPipeHandsNode(Node):
             self.flight_data_callback,
             10
         )
-
 
         self.get_logger().info('MediaPipe Hands node has been started.')
 
@@ -258,25 +248,7 @@ class MediaPipeHandsNode(Node):
                         self.flying = True
                         self.flying_check_count = 0
 
-    def tello_action(self, action):
-        """
-        Publish a Tello action command.
-        """
-        
-        if self.pending_action is not None:
-            self.get_logger().info(f'Attempting to perform action: {self.pending_action}')
-            return
-
-        self.pending_action = action
-        
-        self.req.cmd = action
-        self.future = self.cli.call_async(self.req)
-        self.get_logger().info(f'Published Tello action: {action}')
-
     def adjust_flight(self, hand_state, h_status, v_status, normal_vector, distance):
-        if not self.flying:
-            return
-    
         # hand_state = "Open" or "Closed"
         # h_status from 0.0 to 1.0
         # v_status from 0.0 to 1.0
@@ -374,20 +346,6 @@ class MediaPipeHandsNode(Node):
             
             num_hands = len(results.multi_hand_landmarks)
             
-            if self.landed and num_hands >= 1:
-                self.takeoff_count += 1
-                if self.takeoff_count > 20:
-                    self.takeoff_count = 0
-                    self.tello_action('takeoff')
-            
-            #if self.flying:
-            #    if num_hands > 1:
-            #        self.no_hands_detected_count = 0
-            #        self.multi_hand_detected_count += 1
-            #        if self.multi_hand_detected_count > 200:
-            #            self.get_logger().info('Multiple hands detected for a while, landing...')
-            #            self.multi_hand_detected_count = 0
-            #            self.tello_action('land')
             self.get_logger().info(f'Detected {num_hands} hand(s).')
             
             for hand_landmarks in results.multi_hand_landmarks:
@@ -409,8 +367,7 @@ class MediaPipeHandsNode(Node):
             # distance = estimated distance in cm
             
             self.adjust_flight(hand_state, h_status, v_status, normal_vector, distance)
-            
-            
+        
             
             # --- Display the results on the image ---
             # Position text near the wrist (landmark 0)
@@ -424,25 +381,22 @@ class MediaPipeHandsNode(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(cv_image, dist_text, (wrist_coords[0] + 10, wrist_coords[1] + 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                
+        
         else:
             # No hands detected... let's land if needed
-            if self.flying:
-                self.no_hands_detected_count += 1
-                if self.no_hands_detected_count and not self.no_hands_detected_count % 50:
-                    self.get_logger().info('No hands detected, hovering...')
-                    self.pid_forward.clean()
-                    self.pid_sideways.clean()
-                    self.pid_vertical.clean()
-                    self.pid_yaw.clean()
-                    hover_cmd = Twist()
-                    self.cmd_vel_pub.publish(hover_cmd)
-                if self.no_hands_detected_count > 250:
-                    self.no_hands_detected_count = 0
-                    self.get_logger().info('No hands detected for a while, landing...')
-                    self.tello_action('land')
-            
-
+            self.no_hands_detected_count += 1
+            if self.no_hands_detected_count and not self.no_hands_detected_count % 50:
+                self.get_logger().info('No hands detected, hovering...')
+                hover_cmd = Twist()
+                self.cmd_vel_pub.publish(hover_cmd)
+                self.pid_forward.clean()
+                self.pid_sideways.clean()
+                self.pid_vertical.clean()
+                self.pid_yaw.clean()
+            if self.no_hands_detected_count > 250:
+                self.no_hands_detected_count = 0
+                self.get_logger().info('No hands detected for a while, landing...')
+                
 
         # --- Publishing the result ---
         try:
